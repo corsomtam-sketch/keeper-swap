@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harry Keeper Swap</title>
+<style>
+  :root { --bg:#f6f5f2; --fg:#1d1d1b; --muted:#6b6a66; --card:#fff; --line:#dedbd4; --ok:#1f7a3f; --bad:#b3261e; --btn:#1d1d1b; --btnfg:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141413; --fg:#ecebe6; --muted:#9a9890; --card:#1e1e1c; --line:#33322f; --ok:#5fc283; --bad:#ff8a80; --btn:#ecebe6; --btnfg:#141413; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 -apple-system, system-ui, sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin:16px 0; }
+  code { font-size:13px; word-break:break-all; }
+  dt { color:var(--muted); font-size:13px; margin-top:8px; }
+  dd { margin:0; }
+  button { background:var(--btn); color:var(--btnfg); border:0; border-radius:8px; padding:10px 16px; font-size:15px; cursor:pointer; margin:4px 8px 4px 0; }
+  button:disabled { opacity:.4; cursor:default; }
+  #log { white-space:pre-wrap; font:13px/1.5 ui-monospace, monospace; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .muted { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Harry's keeper swap</h1>
+  <p class="muted">bnb compounder, BSC mainnet. Harry signs one transaction from his owner MetaMask. It changes nothing except which bot wallet is allowed to run his positions.</p>
+
+  <div class="card">
+    <dl>
+      <dt>Contract (Automan)</dt><dd><code id="c"></code></dd>
+      <dt>Owner (must be the connected MetaMask account)</dt><dd><code id="o"></code></dd>
+      <dt>Old keeper (being replaced)</dt><dd><code id="ok"></code></dd>
+      <dt>New keeper</dt><dd><code id="nk"></code></dd>
+      <dt>Keeper on-chain right now</dt><dd><code id="cur">checking...</code></dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <button id="connect">1. Connect MetaMask</button>
+    <button id="send" disabled>2. Call setKeeper</button>
+    <div id="log" class="muted"></div>
+  </div>
+</main>
+<script>
+const CONTRACT  = "0x83Ed3eeE74b579487f010C04b2239D03A2CBffdE";
+const OWNER     = "0x705898145d1CfE755c841AF77D57Bb725817833a";
+const OLD_KEEP  = "0xF777d87BAE136FFD9B9BE674C3A5469dD9ca1399";
+const NEW_KEEP  = "0x1a8D7f7790d1C80cCE060b6681A215e1D99E23f8";
+const RPC       = "https://bsc-dataseed.binance.org";
+const BSC       = "0x38";
+const SET_KEEPER_SIG = "0x748747e6";   // setKeeper(address)
+const KEEPER_SIG     = "0xaced1661";   // keeper()
+
+document.getElementById("c").textContent = CONTRACT;
+document.getElementById("o").textContent = OWNER;
+document.getElementById("ok").textContent = OLD_KEEP;
+document.getElementById("nk").textContent = NEW_KEEP;
+
+const logEl = document.getElementById("log");
+function log(msg, cls) { const d = document.createElement("div"); d.textContent = msg; if (cls) d.className = cls; logEl.appendChild(d); }
+
+async function readKeeper() {
+  const r = await fetch(RPC, { method:"POST", headers:{ "content-type":"application/json" },
+    body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_call", params:[{ to:CONTRACT, data:KEEPER_SIG }, "latest"] }) });
+  const j = await r.json();
+  return "0x" + j.result.slice(-40);
+}
+async function showKeeper() {
+  const el = document.getElementById("cur");
+  try {
+    const k = await readKeeper();
+    const isNew = k.toLowerCase() === NEW_KEEP.toLowerCase();
+    const isOld = k.toLowerCase() === OLD_KEEP.toLowerCase();
+    el.textContent = k + (isNew ? "  (NEW, done)" : isOld ? "  (old)" : "  (unexpected!)");
+    el.className = isNew ? "ok" : isOld ? "" : "bad";
+    return k;
+  } catch (e) { el.textContent = "could not read: " + e.message; el.className = "bad"; }
+}
+showKeeper();
+
+// Pick MetaMask via EIP-6963, because other wallet extensions can take over window.ethereum.
+const providers = [];
+window.addEventListener("eip6963:announceProvider", e => providers.push(e.detail));
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+let provider = null, account = null;
+
+document.getElementById("connect").onclick = async () => {
+  logEl.textContent = "";
+  // MetaMask only. No window.ethereum fallback: Phantom and others pretend to be MetaMask there.
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+  await new Promise(r => setTimeout(r, 300));
+  const mm = providers.find(p => p.info.rdns === "io.metamask");
+  if (!mm) {
+    const seen = providers.map(p => p.info.name).join(", ") || "none";
+    log("MetaMask not found on this page (wallets seen: " + seen + "). Nothing was opened.", "bad");
+    return;
+  }
+  provider = mm.provider;
+  try {
+    const accts = await provider.request({ method:"eth_requestAccounts" });
+    account = accts[0];
+    log("Connected: " + account);
+    if (account.toLowerCase() !== OWNER.toLowerCase()) {
+      log("This is not the owner account. In MetaMask, switch to " + OWNER + " and click Connect again.", "bad");
+      return;
+    }
+    let chain = await provider.request({ method:"eth_chainId" });
+    if (chain !== BSC) {
+      log("Switching MetaMask to BNB Smart Chain...");
+      await provider.request({ method:"wallet_switchEthereumChain", params:[{ chainId:BSC }] });
+      chain = await provider.request({ method:"eth_chainId" });
+    }
+    if (chain !== BSC) { log("MetaMask is not on BNB Smart Chain.", "bad"); return; }
+    log("Owner account on BNB Smart Chain. Ready.", "ok");
+    document.getElementById("send").disabled = false;
+  } catch (e) { log("Error: " + (e.message || e), "bad"); }
+};
+
+document.getElementById("send").onclick = async () => {
+  const btn = document.getElementById("send");
+  btn.disabled = true;
+  try {
+    const data = SET_KEEPER_SIG + NEW_KEEP.slice(2).toLowerCase().padStart(64, "0");
+    log("Confirm the transaction in MetaMask (to " + CONTRACT + ", value 0)...");
+    const hash = await provider.request({ method:"eth_sendTransaction", params:[{ from:account, to:CONTRACT, data, value:"0x0" }] });
+    log("Sent: " + hash);
+    log("https://bscscan.com/tx/" + hash);
+    log("Waiting for it to confirm...");
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const k = await showKeeper();
+      if (k && k.toLowerCase() === NEW_KEEP.toLowerCase()) { log("Done. The contract now uses the new keeper.", "ok"); return; }
+    }
+    log("Not confirmed after 3 minutes. Check the BscScan link.", "bad");
+  } catch (e) { log("Error: " + (e.message || e), "bad"); btn.disabled = false; }
+};
+</script>
+</body>
+</html>
